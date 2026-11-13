@@ -86,6 +86,8 @@ Rules carried over from the original:
 - Only printable ASCII is sent. Lines with other characters are refused.
 - A packet longer than 250 bytes is cut to fit.
 - A board does not receive its own broadcast.
+- If another board uses your name, you get a warning with its MAC address. Unlike the
+  original, the message itself is not shown, so it cannot look like it came from you.
 - The room remembers 19 names: ESP-NOW keeps 20 peers and one is the broadcast address.
 
 Direct messages are acknowledged by the receiving radio. If nobody acknowledges, the monitor says
@@ -111,7 +113,7 @@ air, only their numbers, so a new color word only has to be known by the board t
 | File | What it does |
 |---|---|
 | [`src/main.rs`](src/main.rs) | Start-up, and the chat task: one loop that waits for a packet, a typed line, or a button press. |
-| [`src/chat.rs`](src/chat.rs) | The protocol and the contact book: names, color words, `r,g,b` parsing, encode and decode. No hardware. |
+| [`src/chat.rs`](src/chat.rs) | The protocol and the contact book: names, color words, parsing typed lines (`parse_line`), `r,g,b` parsing, encode and decode. No hardware. |
 | [`src/console.rs`](src/console.rs) | Reads keys from the monitor, echoes them, and hands finished lines to the chat task. |
 | [`src/led.rs`](src/led.rs) | Drives the WS2812 RGB LED with the RMT peripheral. |
 | [`src/board.rs`](src/board.rs) | Pin numbers for each board. |
@@ -124,7 +126,9 @@ Compared with the C version:
   lock.
 - **Both serial ports.** Some boards reach the PC through a USB-to-UART bridge (UART0), others
   through the chip's own USB-Serial-JTAG, and some have both connectors. The firmware reads keys
-  from both, so either connector works.
+  from both, so either connector works. Output goes to USB-Serial-JTAG once a USB host has been
+  seen on it, otherwise to UART0 (esp-println's `auto` mode). So if both cables are plugged in,
+  open the monitor on the USB-Serial-JTAG port.
 - **No `led_strip` component.** `led.rs` turns the 24 color bits into RMT pulses itself. It is about
   30 lines and a good place to see how RMT works.
 - **No NVS.** esp-radio does not need it to start the Wi-Fi radio.

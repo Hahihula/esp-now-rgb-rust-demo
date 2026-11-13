@@ -21,7 +21,7 @@ mod chat;
 mod console;
 mod led;
 
-use chat::{Contacts, Mac, MacFmt, Name, Remembered, name_str};
+use chat::{Body, Contacts, Mac, MacFmt, Name, Remembered, Typed, name_str};
 use console::{EVENTS, Event};
 use embassy_executor::Spawner;
 use embassy_futures::select::{Either, select};
@@ -47,8 +47,11 @@ use log::{info, warn};
 
 esp_bootloader_esp_idf::esp_app_desc!();
 
-/// Boards using the original ESP-IDF firmware stay on the default Wi-Fi channel, 1.
-/// Every board in a room must use the same channel.
+/// The Wi-Fi channel the radio listens and sends on. Every board in a room must use the same one.
+/// Boards running the original ESP-IDF firmware stay on the default channel, 1.
+///
+/// `set_channel` below calls `esp_wifi_set_channel`, which tunes the radio itself, so broadcasts
+/// and direct messages (peers added with `channel: None`) all use this channel.
 const ESP_NOW_CHANNEL: u8 = 1;
 
 #[esp_hal::main]
@@ -84,6 +87,8 @@ async fn main(spawner: Spawner) -> ! {
     spawner.spawn(button(button_pin.into()).unwrap());
 
     // ---- Wi-Fi radio on (no router), then ESP-NOW ----
+    // `esp_now` holds its own reference to the Wi-Fi driver, so the radio stays on as long as
+    // the ESP-NOW handles live, even if `wifi` is dropped.
     let wifi = esp_radio::wifi::WifiController::new(peripherals.WIFI, Default::default())
         .expect("Wi-Fi init failed");
     // ESP-NOW starts with the broadcast peer (FF:FF:FF:FF:FF:FF) already added.
@@ -123,13 +128,15 @@ async fn main(spawner: Spawner) -> ! {
     info!("Press BOOT to send everyone the next color.");
 
     loop {
-        match select(receiver.receive_async(), EVENTS.receive()).await {
-            Either::First(packet) => {
+        // `select` polls the first future first. Local events go first: they are rare, so they
+        // cannot starve the radio, while a busy room could otherwise delay your typing.
+        match select(EVENTS.receive(), receiver.receive_async()).await {
+            Either::First(Event::Line(line)) => room.on_line(&line).await,
+            Either::First(Event::Button) => room.on_button().await,
+            Either::Second(packet) => {
                 room.on_packet(&packet.info.src_address, packet.data())
                     .await;
             }
-            Either::Second(Event::Line(line)) => room.on_line(&line).await,
-            Either::Second(Event::Button) => room.on_button().await,
         }
     }
 }
@@ -146,66 +153,47 @@ struct Room {
 
 impl Room {
     /// A line typed in the monitor.
-    async fn on_line(&mut self, line: &str) {
-        if line.is_empty() {
-            return;
-        }
-        if !chat::is_printable_ascii(line.as_bytes()) {
-            warn!("Only ASCII characters are allowed");
-            return;
-        }
-        if line == "list" {
-            self.list();
-            return;
-        }
-
-        let (dest, body) = match chat::split_direct(line) {
-            Some((name, body)) => match self.contacts.lookup(&name) {
-                Some(mac) => (Some((name, mac)), body),
-                None => {
+    async fn on_line(&mut self, line: &[u8]) {
+        match chat::parse_line(line) {
+            Typed::Nothing => {}
+            Typed::NotAscii => warn!("Only ASCII characters are allowed"),
+            Typed::List => self.list(),
+            Typed::Send {
+                to: None,
+                body,
+                typed,
+            } => {
+                if self.send(&BROADCAST_ADDRESS, body).await {
+                    info!("Sent: {typed}");
+                }
+            }
+            Typed::Send {
+                to: Some(name),
+                body,
+                typed,
+            } => {
+                let Some(mac) = self.contacts.lookup(&name) else {
                     warn!(
                         "No contact named {} yet. Wait until that board sends something.",
                         name_str(&name)
                     );
                     return;
-                }
-            },
-            None => (None, line),
-        };
-        if body.is_empty() {
-            return;
-        }
-
-        // A color word goes out as its numbers, so the receiver needs no word list.
-        let mut encoded: heapless::String<12> = heapless::String::new();
-        let text = match chat::find_command(body) {
-            Some(c) => {
-                use core::fmt::Write;
-                let _ = write!(encoded, "{},{},{}", c.r, c.g, c.b);
-                encoded.as_str()
-            }
-            None => body,
-        };
-
-        match dest {
-            None => {
-                if self.send(&BROADCAST_ADDRESS, text).await {
-                    info!("Sent: {body}");
-                }
-            }
-            Some((name, mac)) => {
-                if self.send(&mac, text).await {
-                    info!("Sent to {}: {body}", name_str(&name));
+                };
+                if self.send(&mac, body).await {
+                    info!("Sent to {}: {typed}", name_str(&name));
                 }
             }
         }
     }
 
+    /// BOOT: broadcast the next color in `chat::BUTTON_CYCLE`.
     async fn on_button(&mut self) {
         let word = chat::BUTTON_CYCLE[self.next_button_color];
         self.next_button_color = (self.next_button_color + 1) % chat::BUTTON_CYCLE.len();
-        info!("BOOT pressed, sending: {word}");
-        self.on_line(word).await;
+        let rgb = chat::find_command(word).expect("BUTTON_CYCLE words are in COMMANDS");
+        if self.send(&BROADCAST_ADDRESS, Body::Color(rgb)).await {
+            info!("BOOT pressed, sent: {word}");
+        }
     }
 
     /// One ESP-NOW packet from another board.
@@ -217,11 +205,17 @@ impl Room {
             return;
         };
 
+        // Our own broadcasts never come back to us, so this is a different board. Show nothing
+        // of what it sent: printing "User <our name>: ..." would only add to the confusion.
         if sender == self.me {
-            warn!("Another board is using your name");
-        } else {
-            self.remember(sender, *src);
+            warn!(
+                "Another board ({}) is using your name {}; ignoring its message",
+                MacFmt(src),
+                name_str(&sender)
+            );
+            return;
         }
+        self.remember(sender, *src);
 
         if body.is_empty() {
             return;
@@ -230,11 +224,9 @@ impl Room {
             Some(rgb) => {
                 self.led.set(rgb).await;
                 info!(
-                    "User {} set your LED to {},{},{}",
+                    "User {} set your LED to {}",
                     name_str(&sender),
-                    rgb.r,
-                    rgb.g,
-                    rgb.b
+                    chat::encode_color(rgb)
                 );
             }
             None => info!("User {}: {body}", name_str(&sender)),
@@ -244,35 +236,53 @@ impl Room {
     /// Keep the contact book and the ESP-NOW peer list in step.
     /// A direct send only works to a MAC that is a registered peer.
     fn remember(&mut self, name: Name, mac: Mac) {
-        match self.contacts.remember(name, mac) {
+        let old_mac = match self.contacts.remember(name, mac) {
             Remembered::Known => return,
             Remembered::Full => {
                 warn!("Contact book is full, not saving {}", name_str(&name));
                 return;
             }
-            Remembered::Moved { old_mac } => {
-                let _ = self.manager.remove_peer(&old_mac);
-            }
-            Remembered::New => {}
-        }
+            Remembered::New => None,
+            Remembered::Moved { old_mac } => Some(old_mac),
+        };
 
+        // Add the new peer first, so a failure leaves the old, working state in place.
         let peer = PeerInfo {
             interface: EspNowWifiInterface::Station,
             peer_address: mac,
             lmk: None,
-            channel: None, // the current channel
+            channel: None, // the radio's channel, see ESP_NOW_CHANNEL
             encrypt: false,
         };
-        if self.manager.peer_exists(&mac) || self.manager.add_peer(peer).is_ok() {
-            info!("Saved contact {} ({})", name_str(&name), MacFmt(&mac));
-        } else {
-            warn!("Could not add an ESP-NOW peer for {}", name_str(&name));
-            self.contacts.forget(&name);
+        if !self.manager.peer_exists(&mac)
+            && let Err(e) = self.manager.add_peer(peer)
+        {
+            warn!(
+                "Could not add an ESP-NOW peer for {} ({e:?})",
+                name_str(&name)
+            );
+            match old_mac {
+                Some(old_mac) => {
+                    self.contacts.remember(name, old_mac);
+                }
+                None => self.contacts.forget(&name),
+            }
+            return;
         }
+
+        if let Some(old_mac) = old_mac
+            && let Err(e) = self.manager.remove_peer(&old_mac)
+        {
+            warn!(
+                "Could not remove the old ESP-NOW peer {} ({e:?})",
+                MacFmt(&old_mac)
+            );
+        }
+        info!("Saved contact {} ({})", name_str(&name), MacFmt(&mac));
     }
 
     fn list(&self) {
-        if self.contacts.len() == 0 {
+        if self.contacts.is_empty() {
             info!("No contacts yet. Wait until another board sends something.");
             return;
         }
@@ -286,8 +296,8 @@ impl Room {
     ///
     /// For a direct message the result also says whether the other board acknowledged it.
     /// Broadcasts are never acknowledged, so they always count as sent.
-    async fn send(&mut self, dest: &Mac, text: &str) -> bool {
-        let (packet, trimmed) = chat::encode(&self.me, text);
+    async fn send(&mut self, dest: &Mac, body: Body<'_>) -> bool {
+        let (packet, trimmed) = chat::encode(&self.me, body);
         if trimmed {
             warn!("Trimming the message to {} bytes", chat::MAX_PACKET_LEN);
         }
@@ -314,9 +324,14 @@ async fn button(pin: AnyPin<'static>) {
     let mut button = Input::new(pin, InputConfig::default().with_pull(Pull::Up));
     loop {
         button.wait_for_falling_edge().await;
+        // Let the contacts settle, then check the button is really held. A bounce or a glitch
+        // that is already over does not count.
+        Timer::after(Duration::from_millis(20)).await;
+        if button.is_high() {
+            continue;
+        }
         EVENTS.send(Event::Button).await;
-        // Debounce, then wait for release.
-        Timer::after(Duration::from_millis(50)).await;
+        // One press, one event: wait for release, and let the release bounce settle too.
         button.wait_for_high().await;
         Timer::after(Duration::from_millis(50)).await;
     }

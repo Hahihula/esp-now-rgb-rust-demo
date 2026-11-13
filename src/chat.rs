@@ -74,8 +74,7 @@ const ANIMALS: [&str; 16] = [
 pub fn node_name(mac: &Mac) -> Name {
     let animal = ANIMALS[usize::from(mac[3] ^ mac[4] ^ mac[5]) % ANIMALS.len()];
     let mut s: heapless::String<NAME_LEN> = heapless::String::new();
-    // Cannot fail: 4 + 2 * 2 characters.
-    let _ = write!(s, "{animal}{:02x}{:02x}", mac[4], mac[5]);
+    write!(s, "{animal}{:02x}{:02x}", mac[4], mac[5]).expect("a name is 4 + 2 * 2 characters");
     let mut name = [0; NAME_LEN];
     name.copy_from_slice(s.as_bytes());
     name
@@ -103,15 +102,42 @@ pub fn parse_rgb(s: &str) -> Option<Rgb> {
     Some(rgb)
 }
 
-/// `"<name>:<body>"`, cut to fit one ESP-NOW packet.
-pub fn encode(from: &Name, body: &str) -> (Packet, bool) {
+/// What goes after `<name>:` in a packet.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Body<'a> {
+    Text(&'a str),
+    /// Sent as its numbers, so the receiver needs no word list.
+    Color(Rgb),
+}
+
+/// `"20,0,0"`: at most 3 digits per channel, so it always fits.
+pub type ColorText = heapless::String<11>;
+
+pub fn encode_color(rgb: Rgb) -> ColorText {
+    let mut s = ColorText::new();
+    write!(s, "{},{},{}", rgb.r, rgb.g, rgb.b).expect("3 * 3 digits + 2 commas");
+    s
+}
+
+/// `"<name>:<body>"`, cut to fit one ESP-NOW packet. The flag says whether it was cut.
+pub fn encode(from: &Name, body: Body<'_>) -> (Packet, bool) {
+    let color;
+    let text = match body {
+        Body::Text(text) => text.as_bytes(),
+        Body::Color(rgb) => {
+            color = encode_color(rgb);
+            color.as_bytes()
+        }
+    };
+
     let mut packet = Packet::new();
-    let _ = packet.extend_from_slice(from);
-    let _ = packet.push(b':');
-    let room = MAX_PACKET_LEN - packet.len();
-    let trimmed = body.len() > room;
-    let _ = packet.extend_from_slice(&body.as_bytes()[..body.len().min(room)]);
-    (packet, trimmed)
+    // The name and ':' are 9 bytes; the text is cut to the space left, so nothing overflows.
+    let room = MAX_PACKET_LEN - (NAME_LEN + 1);
+    let len = text.len().min(room);
+    packet.extend_from_slice(from).unwrap();
+    packet.push(b':').unwrap();
+    packet.extend_from_slice(&text[..len]).unwrap();
+    (packet, len < text.len())
 }
 
 /// Splits a received packet into sender and body. `None` if it is not a chat packet.
@@ -125,15 +151,58 @@ pub fn decode(data: &[u8]) -> Option<(Name, &str)> {
     Some((name, body))
 }
 
-/// A typed line that starts with `<8-character name>:` is a direct message.
-pub fn split_direct(line: &str) -> Option<(Name, &str)> {
-    let bytes = line.as_bytes();
-    if bytes.len() < NAME_LEN + 1 || bytes[NAME_LEN] != b':' {
-        return None;
+/// What a line typed in the monitor asks for.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Typed<'a> {
+    /// Empty line, or a direct message with nothing after the colon.
+    Nothing,
+    /// The line has bytes outside printable ASCII.
+    NotAscii,
+    /// `list`: print the contact book. Nothing is sent.
+    List,
+    /// Send `body`, to everyone (`to: None`) or to one contact. `typed` is the body as typed,
+    /// for the "Sent: ..." log line.
+    Send {
+        to: Option<Name>,
+        body: Body<'a>,
+        typed: &'a str,
+    },
+}
+
+/// Turns a typed line into an [`Typed`]. All command words live here or in [`COMMANDS`].
+pub fn parse_line(line: &[u8]) -> Typed<'_> {
+    if line.is_empty() {
+        return Typed::Nothing;
     }
-    let mut name = [0; NAME_LEN];
-    name.copy_from_slice(&bytes[..NAME_LEN]);
-    Some((name, &line[NAME_LEN + 1..]))
+    if !is_printable_ascii(line) {
+        return Typed::NotAscii;
+    }
+    // Printable ASCII is valid UTF-8.
+    let Ok(line) = core::str::from_utf8(line) else {
+        return Typed::NotAscii;
+    };
+    if line == "list" {
+        return Typed::List;
+    }
+
+    // `<8-character name>:<body>` is a direct message.
+    let (to, typed) = match line.as_bytes().get(NAME_LEN) {
+        Some(b':') => {
+            let mut name = [0; NAME_LEN];
+            name.copy_from_slice(&line.as_bytes()[..NAME_LEN]);
+            (Some(name), &line[NAME_LEN + 1..])
+        }
+        _ => (None, line),
+    };
+    if typed.is_empty() {
+        return Typed::Nothing;
+    }
+
+    let body = match find_command(typed) {
+        Some(rgb) => Body::Color(rgb),
+        None => Body::Text(typed),
+    };
+    Typed::Send { to, body, typed }
 }
 
 #[derive(Clone, Copy)]
@@ -179,7 +248,8 @@ impl Contacts {
         }
     }
 
-    /// Undo a `New` when the ESP-NOW peer could not be added.
+    /// Undo a `New` when the ESP-NOW peer could not be added. (Undo a `Moved` by remembering
+    /// the old MAC again.)
     pub fn forget(&mut self, name: &Name) {
         self.entries.retain(|c| &c.name != name);
     }
@@ -190,6 +260,10 @@ impl Contacts {
 
     pub fn len(&self) -> usize {
         self.entries.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
     }
 }
 

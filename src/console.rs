@@ -14,7 +14,8 @@ use esp_println::print;
 /// Longer lines are cut; a packet only carries 250 bytes anyway.
 pub const LINE_MAX: usize = 256;
 
-pub type Line = heapless::String<LINE_MAX>;
+/// Raw bytes as typed. The chat task decides whether they are acceptable (printable ASCII).
+pub type Line = heapless::Vec<u8, LINE_MAX>;
 
 /// Everything that can wake up the chat task besides an incoming packet.
 // `Line` is much bigger than `Button`; with a 4-slot queue that costs about 1 KiB, which is fine.
@@ -47,16 +48,15 @@ impl LineEditor {
                         print!("\x08 \x08");
                     }
                 }
-                0x20..=0x7E => {
-                    if self.line.push(char::from(byte)).is_err() {
+                // Every byte we keep is echoed as exactly one column, so backspace stays in step.
+                // Non-ASCII bytes are kept (shown as `?`) so the chat task refuses the line, like
+                // the original does. A multi-byte UTF-8 character shows as several `?`.
+                0x20.. => {
+                    if self.line.push(byte).is_err() {
                         continue; // line is full
                     }
-                    print!("{}", char::from(byte));
-                }
-                // Keep non-ASCII bytes (unechoed) so the chat task can refuse the line, like
-                // the original does.
-                0x80.. => {
-                    let _ = self.line.push(char::from(byte));
+                    let shown = if byte < 0x7F { char::from(byte) } else { '?' };
+                    print!("{shown}");
                 }
                 _ => {} // other control characters
             }

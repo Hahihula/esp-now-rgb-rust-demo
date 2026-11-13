@@ -77,3 +77,15 @@ macro_rules! board_pins {
 pub const BOARD_NAME: &str = "ESP32-C3-LCDkit";
 
 pub(crate) use board_pins;
+
+// Two boards at once would define the pins twice. Fail with a clear message instead.
+const _: () = assert!(
+    (cfg!(feature = "s31-function-coreboard") as u8
+        + cfg!(feature = "s31-korvo") as u8
+        + cfg!(feature = "c6-devkitc") as u8
+        + cfg!(feature = "c5-devkitc") as u8
+        + cfg!(feature = "c3-rust-board") as u8
+        + cfg!(feature = "c3-lcdkit") as u8)
+        <= 1,
+    "Select exactly one board feature."
+);

@@ -5,6 +5,7 @@
 //! peripheral made for exactly that: we hand it a list of `PulseCode`s and it plays them on a
 //! pin with exact timing, while the CPU does something else.
 
+use embassy_time::Timer;
 use esp_hal::{
     Async,
     gpio::{Level, interconnect::PeripheralOutput},
@@ -23,6 +24,9 @@ const T0H: u16 = 32;
 const T0L: u16 = 68;
 const T1H: u16 = 64;
 const T1L: u16 = 36;
+
+/// Reset (latch) time in microseconds.
+const RESET_US: u64 = 300;
 
 pub struct Led {
     channel: Channel<'static, Async, Tx>,
@@ -64,5 +68,9 @@ impl Led {
         if let Err(e) = self.channel.transmit(&pulses).await {
             log::warn!("LED update failed: {e:?}");
         }
+        // The LED shows the new color only after the line has been low for the reset time.
+        // Wait it out here, so a quick second update cannot run into this one. Newer WS2812B
+        // parts need 280 us, older ones 50 us.
+        Timer::after_micros(RESET_US).await;
     }
 }
