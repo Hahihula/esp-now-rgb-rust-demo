@@ -1,0 +1,97 @@
+[package]
+name        = "esp-now-rgb-rust-demo"
+version     = "0.1.0"
+edition     = "2024"
+publish     = false
+description = "ESP-NOW chat room with remote RGB LED control. no_std Rust port of Jan Beran's ESP-IDF workshop Assignment 5."
+
+[[bin]]
+name = "esp-now-rgb-rust-demo"
+path = "src/main.rs"
+test = false
+bench = false
+
+[dependencies]
+embassy-executor       = "0.10.0"
+embassy-futures        = "0.1"
+embassy-sync           = "0.8"
+embassy-time           = "0.5.0"
+embedded-io-async      = "0.7"
+esp-alloc              = "0.11.0"
+esp-backtrace          = { version = "0.20.0", features = ["panic-handler", "println"] }
+esp-bootloader-esp-idf = "0.6.0"
+esp-hal                = { version = "1.2.0", features = ["log-04", "unstable"] }
+esp-println            = { version = "0.18.0", features = ["log-04"] }
+esp-radio              = { version = "1.0.0-beta.2", features = ["esp-now", "log-04", "unstable", "wifi"] }
+esp-rtos               = { version = "0.4.0", features = ["embassy", "esp-radio", "log-04"] }
+heapless               = "0.9"
+log                    = "0.4"
+static_cell            = "2.1.1"
+
+[features]
+# ---- Boards: select exactly one (the cargo aliases in .cargo/config.toml do it for you) ----
+s31-function-coreboard = ["esp32s31"]
+s31-korvo              = ["esp32s31"]
+c6-devkitc             = ["esp32c6"]
+c5-devkitc             = ["esp32c5"]
+c3-rust-board          = ["esp32c3"]
+c3-lcdkit              = ["esp32c3"]
+
+# ---- Chips: selected by the board features above ----
+esp32c3 = [
+    "esp-alloc/esp32c3",
+    "esp-backtrace/esp32c3",
+    "esp-bootloader-esp-idf/esp32c3",
+    "esp-hal/esp32c3",
+    "esp-println/esp32c3",
+    "esp-radio/esp32c3",
+    "esp-rtos/esp32c3",
+]
+esp32c5 = [
+    "esp-alloc/esp32c5",
+    "esp-backtrace/esp32c5",
+    "esp-bootloader-esp-idf/esp32c5",
+    "esp-hal/esp32c5",
+    "esp-println/esp32c5",
+    "esp-radio/esp32c5",
+    "esp-rtos/esp32c5",
+]
+esp32c6 = [
+    "esp-alloc/esp32c6",
+    "esp-backtrace/esp32c6",
+    "esp-bootloader-esp-idf/esp32c6",
+    "esp-hal/esp32c6",
+    "esp-println/esp32c6",
+    "esp-radio/esp32c6",
+    "esp-rtos/esp32c6",
+]
+esp32s31 = [
+    "esp-alloc/esp32s31",
+    "esp-backtrace/esp32s31",
+    "esp-bootloader-esp-idf/esp32s31",
+    "esp-hal/esp32s31",
+    "esp-println/esp32s31",
+    "esp-radio/esp32s31",
+    "esp-rtos/esp32s31",
+]
+
+# ESP32-S31 support is not in a crates.io release yet. This esp-hal revision is from 2026-10-15
+# (the same one esp-touch-paint uses).
+[patch.crates-io]
+esp-alloc              = { git = "https://github.com/esp-rs/esp-hal", rev = "8a70d09fe0065d5387dac82e4fbe937e95e496e1" }
+esp-backtrace          = { git = "https://github.com/esp-rs/esp-hal", rev = "8a70d09fe0065d5387dac82e4fbe937e95e496e1" }
+esp-bootloader-esp-idf = { git = "https://github.com/esp-rs/esp-hal", rev = "8a70d09fe0065d5387dac82e4fbe937e95e496e1" }
+esp-hal                = { git = "https://github.com/esp-rs/esp-hal", rev = "8a70d09fe0065d5387dac82e4fbe937e95e496e1" }
+esp-println            = { git = "https://github.com/esp-rs/esp-hal", rev = "8a70d09fe0065d5387dac82e4fbe937e95e496e1" }
+esp-radio              = { git = "https://github.com/esp-rs/esp-hal", rev = "8a70d09fe0065d5387dac82e4fbe937e95e496e1" }
+esp-rtos               = { git = "https://github.com/esp-rs/esp-hal", rev = "8a70d09fe0065d5387dac82e4fbe937e95e496e1" }
+
+[profile.dev]
+opt-level = "s"
+
+[profile.release]
+codegen-units    = 1
+debug            = true
+debug-assertions = false
+lto              = "fat"
+opt-level        = "s"
